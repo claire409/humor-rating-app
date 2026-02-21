@@ -24,5 +24,5 @@ export default async function Home() {
   }
 
   // 2. PROTECTED UI: Show original Assignment 2 visual
-  return <MemeFeed userEmail={user.email} />;
+  return <MemeFeed userEmail={user?.email} userId={user?.id} />;
 }
