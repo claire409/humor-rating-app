@@ -19,8 +19,27 @@
   }
 }
 
+
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+}
+
+@layer utilities {
+  @keyframes floatUp {
+    0% { transform: translateY(100vh); opacity: 0; }
+    10% { opacity: 0.2; }
+    90% { opacity: 0.2; }
+    100% { transform: translateY(-20vh); opacity: 0; }
+  }
+
+  .animate-float-up {
+    animation: floatUp 15s linear infinite;
+  }
+
+  .bg-dot-grid {
+    background-image: radial-gradient(#000000 0.5px, transparent 0.5px);
+    background-size: 32px 32px;
+  }
 }

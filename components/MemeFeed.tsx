@@ -1,144 +1,280 @@
-// src/components/MemeFeed.tsx
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { createBrowserClient } from '@supabase/ssr';
-import { submitVote } from '@/app/actions';
+import { submitVote, processImageUpload } from '@/app/actions';
 
-export default function MemeFeed({ userEmail, userId }: { userEmail: string | undefined; userId: string; }) {
-  const [supabase] = useState(() =>
-    createBrowserClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-    )
-  );
+type Tab = 'feed' | 'create';
 
+export default function MemeFeed({ userEmail, userId }: { userEmail: string; userId: string; }) {
+  const [supabase] = useState(() => createBrowserClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  ));
+
+  const [activeTab, setActiveTab] = useState<Tab>('feed');
   const [captions, setCaptions] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [lastUpload, setLastUpload] = useState<{url: string, captions: any[]} | null>(null);
+
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [displayName, setDisplayName] = useState<string>("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const fetchData = useCallback(async () => {
-    try {
-      setLoading(true);
+    setLoading(true);
+    const { data: vData } = await supabase.from('caption_votes').select('caption_id').eq('profile_id', userId);
+    const votedIds = new Set(vData?.map(v => v.caption_id));
+    const { data: cData } = await supabase.from('captions')
+      .select(`id, content, profiles(first_name), images(url)`)
+      .order('id', { ascending: false });
 
-      // 1. Get IDs of memes user already voted on
-      const { data: voteData, error: voteError } = await supabase
-        .from('caption_votes')
-        .select('caption_id')
-        .eq('profile_id', userId);
-
-      if (voteError) throw voteError;
-      const votedIds = new Set(voteData?.map(v => v.caption_id));
-
-      // 2. Fetch all captions (Sorted by 'id' to avoid 'created_at' errors)
-      const { data: captionData, error: captionError } = await supabase
-        .from('captions')
-        .select(`
-          id,
-          content,
-          like_count,
-          profiles ( first_name, last_name ),
-          images ( url )
-        `)
-        .order('id', { ascending: true });
-
-      if (captionError) throw captionError;
-
-      // 3. Filter out the ones already voted on
-      const unvoted = captionData?.filter(c => !votedIds.has(c.id)) || [];
-
-      setCaptions(unvoted);
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
+    setCaptions(cData?.filter(c => !votedIds.has(c.id)) || []);
+    setLoading(false);
   }, [supabase, userId]);
 
-  useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+  useEffect(() => { fetchData(); }, [fetchData]);
 
-  if (error) return <div className="p-10 text-center text-red-500">Error: {error}</div>;
+  // Restored and improved Vote Handler
+  const handleVote = async (captionId: string, voteValue: number) => {
+    const formData = new FormData();
+    formData.append('captionId', captionId);
+    formData.append('userId', userId);
+    formData.append('vote', voteValue.toString());
+
+    // Call the server action
+    await submitVote(formData);
+
+    // Refresh the feed immediately
+    fetchData();
+  };
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    setDisplayName(file.name);
+
+    const isHeic = file.name.toLowerCase().endsWith('.heic') || file.type === 'image/heic';
+
+    if (isHeic) {
+      try {
+        const module = await import('heic2any');
+        const heic2any = module.default || module;
+        const convertedBlob = await heic2any({ blob: file, toType: 'image/jpeg', quality: 0.7 });
+        const resultBlob = Array.isArray(convertedBlob) ? convertedBlob[0] : convertedBlob;
+        const newFile = new File([resultBlob], file.name, { type: 'image/jpeg' });
+        setSelectedFile(newFile);
+        setPreviewUrl(URL.createObjectURL(resultBlob));
+      } catch (err) {
+        console.error("Preview conversion failed:", err);
+        alert("Could not preview HEIC file.");
+      }
+    } else {
+      setSelectedFile(file);
+      setPreviewUrl(URL.createObjectURL(file));
+    }
+  };
+
+  const handleClearImage = () => {
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    setSelectedFile(null);
+    setPreviewUrl(null);
+    setDisplayName("");
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const handleUpload = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (!selectedFile) return;
+
+    setIsUploading(true);
+    setLastUpload(null);
+
+    try {
+      const formData = new FormData();
+      formData.append('image', selectedFile);
+
+      const { data: { session } } = await supabase.auth.getSession();
+      const result = await processImageUpload(formData, session?.access_token!);
+
+      if (result.success) {
+        setLastUpload({ url: result.imageUrl, captions: result.captions });
+        handleClearImage();
+        fetchData();
+      } else {
+        alert("Error: " + result.error);
+      }
+    } catch (err) {
+      alert("Failed to upload.");
+    } finally {
+      setIsUploading(false);
+    }
+  };
 
   return (
-    <main className="min-h-screen bg-slate-50 p-6 md:p-12 font-sans">
-      <div className="max-w-2xl mx-auto">
-        <header className="mb-12 flex justify-between items-center">
-          <div>
-            <h1 className="text-3xl font-black text-slate-900 tracking-tight">The Humor Project</h1>
-            <p className="text-slate-500 text-sm">Welcome, <span className="text-blue-600 font-bold">{userEmail}</span></p>
+    <div className="min-h-screen bg-[#FEF9C3] relative">
+      <div className="fixed inset-0 bg-dot-grid opacity-[0.03] pointer-events-none"></div>
+
+      <div className="relative z-10 text-slate-900 font-sans">
+        <nav className="flex items-center justify-between px-8 py-5 border-b border-slate-200 bg-white sticky top-0 z-50 shadow-sm">
+          <div className="flex items-center gap-3">
+            <span className="text-xl">😂</span>
+            <span className="font-bold tracking-widest text-sm uppercase text-slate-900">The Humor Project</span>
           </div>
-          <form action="/auth/logout" method="POST">
-            <button className="text-xs font-bold text-slate-400 hover:text-red-500 uppercase tracking-widest transition-colors">Logout</button>
-          </form>
-        </header>
 
-        {loading ? (
-          <div className="flex justify-center items-center h-64 text-slate-400 italic animate-pulse">Finding fresh memes...</div>
-        ) : (
-          <div className="flex flex-col items-center">
-            {captions.length === 0 ? (
-              /* --- ALL CAUGHT UP STATE --- */
-              <div className="text-center py-20 w-full bg-white rounded-3xl border-2 border-dashed border-slate-200">
-                <h2 className="text-2xl font-bold text-slate-800">You're all caught up! 🏁</h2>
-                <p className="text-slate-500">No more memes left to vote on right now.</p>
-              </div>
-            ) : (
-              /* --- THE ACTIVE CARD --- */
-              (() => {
-                const item = captions[0];
-                const fullName = (item.profiles?.first_name || item.profiles?.last_name)
-                  ? `${item.profiles?.first_name ?? ''} ${item.profiles?.last_name ?? ''}`.trim()
-                  : "Anonymous";
+          <div className="flex items-center gap-10">
+            <div className="flex items-center gap-8">
+              {['feed', 'create'].map((tab) => (
+                <button
+                  key={tab}
+                  onClick={() => setActiveTab(tab as Tab)}
+                  className={`text-[11px] font-bold tracking-[0.2em] uppercase transition-all ${
+                    activeTab === tab ? 'text-slate-900 border-b-2 border-slate-900 pb-1' : 'text-slate-400 hover:text-slate-600'
+                  }`}
+                >
+                  {tab}
+                </button>
+              ))}
+            </div>
+            <div className="h-4 w-[1px] bg-slate-200"></div>
+            <div className="flex items-center gap-6">
+              <span className="text-[10px] text-slate-400 font-medium tracking-wider">{userEmail}</span>
+              <form action="/auth/logout" method="POST">
+                <button className="px-5 py-2 text-[10px] font-bold uppercase tracking-widest text-slate-900 border border-slate-900 rounded-full hover:bg-slate-900 hover:text-white transition-all">
+                  Sign out
+                </button>
+              </form>
+            </div>
+          </div>
+        </nav>
 
-                return (
-                  <div key={item.id} className="w-full bg-white rounded-3xl border-4 border-slate-900 shadow-[12px_12px_0px_0px_rgba(0,0,0,1)] overflow-hidden animate-in fade-in zoom-in duration-300">
-                    {/* Meme Image Section */}
-                    <div className="relative h-80 w-full bg-slate-200 border-b-4 border-slate-900">
-                      {item.images?.url ? (
-                        <img src={item.images.url} alt="Meme" className="w-full h-full object-cover" />
-                      ) : (
-                        <div className="flex items-center justify-center h-full text-slate-400 italic">No image available</div>
-                      )}
+        <main className="max-w-xl mx-auto py-16 px-4">
+          {activeTab === 'feed' ? (
+            <section className="space-y-12">
+              {loading ? (
+                <div className="flex flex-col items-center justify-center py-24 gap-4">
+                  <div className="w-6 h-6 border-2 border-slate-200 border-t-slate-900 rounded-full animate-spin"></div>
+                  <p className="text-[10px] font-bold text-slate-400 tracking-[0.2em] uppercase">Loading Feed</p>
+                </div>
+              ) : captions.length > 0 ? (
+                (() => {
+                  const item = captions[0];
+                  return (
+                    <div key={item.id} className="bg-white rounded-3xl border border-slate-200 overflow-hidden shadow-sm animate-in fade-in duration-700">
+                      <img src={item.images?.url} className="w-full h-[450px] object-cover border-b border-slate-100" alt="Meme" />
+                      <div className="p-12 text-center space-y-4">
+                        <p className="text-2xl font-bold text-slate-900 leading-snug">"{item.content}"</p>
+                        <p className="text-[10px] text-slate-400 font-bold uppercase tracking-[0.2em]">Curated by {item.profiles?.first_name || 'Anonymous'}</p>
+                      </div>
+                      <div className="flex border-t border-slate-100 divide-x divide-slate-100 h-24">
+                        <button
+                          onClick={() => handleVote(item.id, -1)}
+                          className="flex-1 h-full text-4xl hover:bg-slate-50 transition-colors opacity-60 hover:opacity-100"
+                        >
+                          👎
+                        </button>
+                        <button
+                          onClick={() => handleVote(item.id, 1)}
+                          className="flex-1 h-full text-4xl hover:bg-slate-50 transition-colors opacity-60 hover:opacity-100"
+                        >
+                          👍
+                        </button>
+                      </div>
                     </div>
+                  );
+                })()
+              ) : (
+                <div className="text-center py-32 border border-slate-200 rounded-[3rem] bg-white/50">
+                  <p className="text-slate-400 font-bold tracking-[0.2em] text-[10px] uppercase">All caught up</p>
+                </div>
+              )}
+            </section>
+          ) : (
+            <section className="space-y-8 animate-in fade-in duration-500">
+              <div className="bg-white p-12 rounded-[2.5rem] border border-slate-200 shadow-sm">
+                <h2 className="text-lg font-bold mb-8 text-slate-900 tracking-tight text-center">AI Caption Generator</h2>
 
-                    {/* Content Section */}
-                    <div className="p-10 text-center">
-                      <p className="text-3xl text-slate-900 font-black italic leading-tight mb-4">"{item.content}"</p>
-                      <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Submitted by {fullName}</p>
-                    </div>
-
-                    {/* Vote Buttons Section */}
-                    <div className="px-10 py-8 bg-slate-50 border-t-4 border-slate-900 flex justify-around items-center">
-                      <form action={submitVote} onSubmit={() => setTimeout(fetchData, 500)}>
-                        <input type="hidden" name="captionId" value={item.id} />
-                        <input type="hidden" name="userId" value={userId} />
-                        <input type="hidden" name="vote" value="-1" />
-                        <button type="submit" className="text-7xl hover:scale-110 active:scale-90 transition-transform cursor-pointer">👎</button>
-                      </form>
-
-                      <form action={submitVote} onSubmit={() => setTimeout(fetchData, 500)}>
-                        <input type="hidden" name="captionId" value={item.id} />
-                        <input type="hidden" name="userId" value={userId} />
-                        <input type="hidden" name="vote" value="1" />
-                        <button type="submit" className="text-7xl hover:scale-110 active:scale-90 transition-transform cursor-pointer">👍</button>
-                      </form>
-                    </div>
+                <form onSubmit={handleUpload} className="space-y-8">
+                  <div className="relative border border-slate-100 rounded-3xl p-6 bg-slate-50/50 hover:bg-white hover:border-blue-200 transition-all group overflow-hidden">
+                    {!selectedFile ? (
+                      <div className="py-6 transition-all text-center">
+                        <input
+                          ref={fileInputRef}
+                          type="file"
+                          name="image"
+                          accept="image/jpeg,image/jpg,image/png,image/webp,image/gif,image/heic"
+                          required
+                          onChange={handleFileChange}
+                          className="block w-full text-xs text-slate-400 file:mr-6 file:py-2 file:px-5 file:rounded-full file:border file:border-slate-200 file:bg-white file:text-slate-900 file:font-bold hover:file:bg-slate-50 transition-all"
+                        />
+                        <p className="mt-4 text-[10px] font-bold text-slate-300 uppercase tracking-widest">
+                          JPEG, JPG, PNG, WEBP, GIF, HEIC
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="space-y-4 animate-in zoom-in-95 duration-300">
+                        <div className="relative rounded-2xl overflow-hidden bg-white border border-slate-200">
+                          <img
+                            src={previewUrl || ""}
+                            alt="Selected preview"
+                            className="w-full h-48 object-contain bg-slate-50"
+                          />
+                          <button
+                            type="button"
+                            onClick={handleClearImage}
+                            className="absolute top-2 right-2 px-3 py-1.5 bg-white border border-slate-200 rounded-full text-[10px] font-bold text-red-500 hover:bg-red-50 transition-all shadow-sm"
+                          >
+                            ✕ Change Image
+                          </button>
+                        </div>
+                        <p className="text-center text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                          {displayName}
+                        </p>
+                      </div>
+                    )}
                   </div>
-                );
-              })()
-            )}
 
-            {/* Queue Counter */}
-            {captions.length > 0 && (
-              <p className="mt-10 text-slate-400 font-bold uppercase text-xs tracking-widest">
-                {captions.length} memes remaining in your queue
-              </p>
-            )}
-          </div>
-        )}
+                  <div className="space-y-3">
+                    <button
+                      disabled={isUploading || !selectedFile}
+                      className="w-full bg-slate-900 text-white py-4 rounded-full font-bold text-xs uppercase tracking-widest hover:bg-slate-800 disabled:bg-slate-100 disabled:text-slate-300 transition-all"
+                    >
+                      {isUploading ? "Processing..." : "Generate captions"}
+                    </button>
+                    {isUploading && (
+                      <p className="text-center text-[10px] font-medium text-slate-400 animate-pulse uppercase tracking-[0.1em]">
+                        This may take a few seconds
+                      </p>
+                    )}
+                  </div>
+                </form>
+              </div>
+              {lastUpload && (
+                <div className="bg-white border border-slate-200 rounded-[2.5rem] p-8 space-y-6 shadow-sm animate-in zoom-in-95 duration-300">
+                  <div className="flex justify-between items-center border-b border-slate-100 pb-4">
+                    <p className="font-bold text-slate-400 uppercase text-[10px] tracking-widest">Pipeline Results</p>
+                    <button onClick={() => setLastUpload(null)} className="text-[10px] font-bold text-slate-300 hover:text-slate-900 uppercase">Dismiss</button>
+                  </div>
+                  <div className="bg-slate-50 rounded-2xl overflow-hidden border border-slate-100">
+                    <img src={lastUpload.url} className="w-full max-h-[500px] object-contain mx-auto" alt="Result" />
+                  </div>
+                  <div className="grid gap-4">
+                    {lastUpload.captions.slice(0, 5).map((cap, idx) => (
+                      <div key={idx} className="bg-slate-50 p-6 rounded-2xl border border-slate-100 hover:border-slate-300 transition-colors">
+                        <p className="text-sm font-medium text-slate-800 italic leading-snug">"{cap.content}"</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </section>
+          )}
+        </main>
       </div>
-    </main>
+    </div>
   );
 }
