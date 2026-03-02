@@ -25,7 +25,7 @@ export default function MemeFeed({ userEmail, userId }: { userEmail: string; use
   const [displayName, setDisplayName] = useState<string>("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // --- PERSISTENCE LOGIC: Fetch ALL previous uploads ---
+  // --- FETCH HISTORY: Gets all user images and their captions ---
   const fetchUploadHistory = useCallback(async () => {
     const { data: images } = await supabase
       .from('images')
@@ -47,6 +47,7 @@ export default function MemeFeed({ userEmail, userId }: { userEmail: string; use
     }
   }, [supabase, userId]);
 
+  // --- FETCH FEED: Gets captions for the voting tab ---
   const fetchData = useCallback(async () => {
     setLoading(true);
     const { data: vData } = await supabase.from('caption_votes').select('caption_id').eq('profile_id', userId);
@@ -77,7 +78,6 @@ export default function MemeFeed({ userEmail, userId }: { userEmail: string; use
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Safety check for large files
     if (file.size > 4 * 1024 * 1024) {
       alert("File too large. Please keep it under 4MB.");
       if (fileInputRef.current) fileInputRef.current.value = '';
@@ -127,17 +127,14 @@ export default function MemeFeed({ userEmail, userId }: { userEmail: string; use
 
       if (result.success) {
         handleClearImage();
-        // Clear state momentarily to force a UI refresh
-        setHistory([]);
-
-        // Await both fetches to ensure the UI updates with fresh data
-        await fetchData();
+        setHistory([]); // Force UI reset
         await fetchUploadHistory();
+        await fetchData();
       } else {
         alert("Error: " + result.error);
       }
     } catch (err) {
-      alert("Failed to upload. Try a smaller file.");
+      alert("Failed to upload. The AI might be busy!");
     } finally {
       setIsUploading(false);
     }
@@ -226,8 +223,16 @@ export default function MemeFeed({ userEmail, userId }: { userEmail: string; use
                           accept="image/jpeg,image/jpg,image/png,image/webp,image/gif,image/heic"
                           required
                           onChange={handleFileChange}
-                          className="block w-full text-xs text-slate-400 file:mr-6 file:py-2 file:px-5 file:rounded-full file:border file:border-slate-200 file:bg-white file:text-slate-900 file:font-bold hover:file:bg-slate-50 transition-all"
+                          className="block w-full text-xs text-slate-400 file:mr-6 file:py-2 file:px-5 file:rounded-full file:border file:border-slate-200 file:bg-white file:text-slate-900 file:font-bold hover:file:bg-slate-50 transition-all cursor-pointer"
                         />
+                        <div className="mt-4 space-y-1">
+                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                            JPG, PNG, WEBP, GIF, HEIC
+                          </p>
+                          <p className="text-[9px] text-slate-300 uppercase tracking-[0.2em]">
+                            Max file size: 4MB
+                          </p>
+                        </div>
                       </div>
                     ) : (
                       <div className="space-y-4 animate-in zoom-in-95 duration-300">
@@ -266,7 +271,11 @@ export default function MemeFeed({ userEmail, userId }: { userEmail: string; use
                     {history.map((item) => (
                       <div key={item.id} className="bg-white border border-slate-200 rounded-[2.5rem] p-8 space-y-6 shadow-sm animate-in fade-in duration-500">
                          <div className="bg-slate-50 rounded-2xl overflow-hidden border border-slate-100">
-                          <img src={`${item.url}?t=${Date.now()}`} className="w-full max-h-[400px] object-contain mx-auto" alt="Uploaded" />
+                          <img
+                            src={`${item.url}?t=${Date.now()}`}
+                            className="w-full max-h-[400px] object-contain mx-auto"
+                            alt="Uploaded"
+                          />
                         </div>
                         <div className="grid gap-3">
                           {item.captions.map((cap: any, idx: number) => (
