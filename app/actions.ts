@@ -48,7 +48,7 @@ export async function submitVote(formData: FormData) {
 
 // --- AI PIPELINE LOGIC (Assignment 5) ---
 
-export async function processImageUpload(formData: FormData, token: string) {
+export async function processImageUpload(formData: FormData, token: string, userId: string) {
   const file = formData.get('image') as File;
 
   try {
@@ -88,13 +88,53 @@ export async function processImageUpload(formData: FormData, token: string) {
 
         const captionsArray = await s4.json(); // Array of 5+ captions
 
+        // Persist generated captions so creation history can show them later.
+        // Only insert if this image doesn't already have captions to avoid duplicates.
+        const { data: existingCaps, error: existingError } = await supabaseAdmin
+          .from('captions')
+          .select('id')
+          .eq('image_id', imageId)
+          .limit(1);
+
+        if (existingError) throw new Error(existingError.message);
+
+        const alreadyHasCaptions = (existingCaps || []).length > 0;
+        if (!alreadyHasCaptions) {
+          const contents: string[] = Array.isArray(captionsArray)
+            ? captionsArray
+                .map((c: any) => (typeof c === 'string' ? c : c?.content))
+                .filter((c: any) => typeof c === 'string')
+                .map((c: string) => c.trim())
+                .filter((c: string) => c.length > 0)
+            : [];
+
+          if (contents.length > 0) {
+            const nowIso = new Date().toISOString();
+            const rows = contents.map((content) => ({
+              image_id: imageId,
+              content,
+              created_by_user_id: userId,
+              modified_by_user_id: userId,
+              created_datetime_utc: nowIso,
+              modified_datetime_utc: nowIso,
+            }));
+
+            const { error: insertCapsError } = await supabaseAdmin
+              .from('captions')
+              .insert(rows);
+
+            if (insertCapsError) throw new Error(insertCapsError.message);
+          }
+        }
+
         revalidatePath('/');
         return {
           success: true,
           captions: captionsArray, // Return the whole list
           imageUrl: cdnUrl
         };
-  } catch (err: any) {
-    return { success: false, error: err.message };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Unknown error';
+    return { success: false, error: message };
   }
 }

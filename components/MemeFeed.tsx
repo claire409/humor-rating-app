@@ -203,7 +203,7 @@ export default function MemeFeed({ userEmail, userId }: { userEmail: string; use
       const formData = new FormData();
       formData.append('image', selectedFile);
       const { data: { session } } = await supabase.auth.getSession();
-      const result = await processImageUpload(formData, session?.access_token!);
+      const result = await processImageUpload(formData, session?.access_token!, userId);
 
       if (result.success) {
         handleClearImage();
