@@ -16,17 +16,33 @@ export async function submitVote(formData: FormData) {
   const userId = formData.get('userId') as string;
   const voteValue = parseInt(formData.get('vote') as string);
 
-  const { error } = await supabaseAdmin
+  // Allow users to change their vote by ensuring only one row exists
+  // per (caption_id, profile_id). We do this as delete-then-insert to
+  // avoid relying on a specific DB unique constraint/index name.
+  const { error: deleteError } = await supabaseAdmin
     .from('caption_votes')
-    .insert([{
-      caption_id: captionId,
-      profile_id: userId,
-      vote_value: voteValue,
-      created_datetime_utc: new Date().toISOString(),
-      modified_datetime_utc: new Date().toISOString()
-    }]);
+    .delete()
+    .eq('caption_id', captionId)
+    .eq('profile_id', userId);
 
-  if (error) throw new Error(error.message);
+  if (deleteError) throw new Error(deleteError.message);
+
+  const { error: insertError } = await supabaseAdmin
+    .from('caption_votes')
+    .insert([
+      {
+        caption_id: captionId,
+        profile_id: userId,
+        vote_value: voteValue,
+        // New schema fields (non-nullable): track the actor for insert/update.
+        created_by_user_id: userId,
+        modified_by_user_id: userId,
+        created_datetime_utc: new Date().toISOString(),
+        modified_datetime_utc: new Date().toISOString(),
+      },
+    ]);
+
+  if (insertError) throw new Error(insertError.message);
   revalidatePath('/');
 }
 

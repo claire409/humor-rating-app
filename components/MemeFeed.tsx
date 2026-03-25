@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { createBrowserClient } from '@supabase/ssr';
 import { submitVote, processImageUpload } from '@/app/actions';
 
-type Tab = 'feed' | 'create';
+type Tab = 'feed' | 'all' | 'create';
 
 export default function MemeFeed({ userEmail, userId }: { userEmail: string; userId: string; }) {
   const [supabase] = useState(() => createBrowserClient(
@@ -19,6 +19,11 @@ export default function MemeFeed({ userEmail, userId }: { userEmail: string; use
 
   // Store an array of history items
   const [history, setHistory] = useState<any[]>([]);
+
+  const [allCaptions, setAllCaptions] = useState<any[]>([]);
+  const [allVotes, setAllVotes] = useState<Record<string, number>>({});
+  const [allLoading, setAllLoading] = useState(true);
+  const [allError, setAllError] = useState<string | null>(null);
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -48,22 +53,90 @@ export default function MemeFeed({ userEmail, userId }: { userEmail: string; use
   }, [supabase, userId]);
 
   // --- FETCH FEED: Gets captions for the voting tab ---
-  const fetchData = useCallback(async () => {
-    setLoading(true);
-    const { data: vData } = await supabase.from('caption_votes').select('caption_id').eq('profile_id', userId);
-    const votedIds = new Set(vData?.map(v => v.caption_id));
-    const { data: cData } = await supabase.from('captions')
-      .select(`id, content, profiles(first_name), images(url)`)
+  const fetchData = useCallback(async (opts?: { showLoading?: boolean }) => {
+    const showLoading = opts?.showLoading ?? true;
+    if (showLoading) setLoading(true);
+
+    const { data: vData } = await supabase
+      .from('caption_votes')
+      .select('caption_id')
+      .eq('profile_id', userId);
+    const votedIds = new Set(vData?.map((v: any) => v.caption_id));
+
+    // Fetch captions with nested images(url) so we don't need direct reads from `images`.
+    // (Direct `images` reads were failing under your updated schema/RLS.)
+    const tryCaptions = await supabase
+      .from('captions')
+      .select(`id, content, image_id, images(url), profiles(first_name)`)
       .order('id', { ascending: false });
 
-    setCaptions(cData?.filter(c => !votedIds.has(c.id)) || []);
-    setLoading(false);
+    let captions: any[] = (tryCaptions.data as any[]) || [];
+    if (tryCaptions.error || !captions) {
+      const fallbackCaptions = await supabase
+        .from('captions')
+        .select(`id, content, image_id, images(url)`)
+        .order('id', { ascending: false });
+      captions = (fallbackCaptions.data as any[]) || [];
+    }
+
+    const unvotedCaptions = captions.filter((c: any) => !votedIds.has(c.id));
+    setCaptions(unvotedCaptions);
+
+    if (showLoading) setLoading(false);
+  }, [supabase, userId]);
+
+  // --- FETCH ALL MEMES: Gets all captions + the current user's votes ---
+  const fetchAllData = useCallback(async (opts?: { showLoading?: boolean }) => {
+    const showLoading = opts?.showLoading ?? true;
+    if (showLoading) setAllLoading(true);
+    setAllError(null);
+
+    const { data: vData } = await supabase
+      .from('caption_votes')
+      .select('caption_id, vote_value')
+      .eq('profile_id', userId);
+
+    const votesByCaptionId: Record<string, number> = {};
+    for (const v of vData || []) {
+      // Supabase may return vote_value as number, string, or sometimes boolean.
+      // Normalize to a predictable numeric representation.
+      const raw = v.vote_value as any;
+      let normalized: number;
+      if (raw === true) normalized = 1;
+      else if (raw === false) normalized = -1;
+      else if (typeof raw === 'number') normalized = raw;
+      else normalized = parseInt(String(raw), 10);
+
+      if (!Number.isNaN(normalized)) {
+        votesByCaptionId[v.caption_id] = normalized;
+      }
+    }
+
+    // Fetch captions with nested images(url) to avoid direct `images` queries.
+    const tryCaptions = await supabase
+      .from('captions')
+      .select(`id, content, image_id, images(url), profiles(first_name)`)
+      .order('id', { ascending: false });
+
+    let captions: any[] = (tryCaptions.data as any[]) || [];
+    if (tryCaptions.error || !captions) {
+      const fallbackCaptions = await supabase
+        .from('captions')
+        .select(`id, content, image_id, images(url)`)
+        .order('id', { ascending: false });
+      captions = (fallbackCaptions.data as any[]) || [];
+    }
+
+    setAllVotes(votesByCaptionId);
+    setAllCaptions(captions || []);
+    if (showLoading) setAllLoading(false);
   }, [supabase, userId]);
 
   useEffect(() => {
-    fetchData();
+    fetchData({ showLoading: true });
+    fetchAllData({ showLoading: true });
     fetchUploadHistory();
-  }, [fetchData, fetchUploadHistory]);
+  }, [fetchData, fetchAllData, fetchUploadHistory]);
 
   const handleVote = async (captionId: string, voteValue: number) => {
     const formData = new FormData();
@@ -71,7 +144,8 @@ export default function MemeFeed({ userEmail, userId }: { userEmail: string; use
     formData.append('userId', userId);
     formData.append('vote', voteValue.toString());
     await submitVote(formData);
-    fetchData();
+    // Keep UI stable: refresh without showing loaders (prevents card "jump").
+    await Promise.all([fetchData({ showLoading: false }), fetchAllData({ showLoading: false })]);
   };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -153,7 +227,7 @@ export default function MemeFeed({ userEmail, userId }: { userEmail: string; use
 
           <div className="flex items-center gap-10">
             <div className="flex items-center gap-8">
-              {['feed', 'create'].map((tab) => (
+              {['feed', 'all', 'create'].map((tab) => (
                 <button
                   key={tab}
                   onClick={() => setActiveTab(tab as Tab)}
@@ -179,35 +253,137 @@ export default function MemeFeed({ userEmail, userId }: { userEmail: string; use
 
         <main className="max-w-xl mx-auto py-16 px-4">
           {activeTab === 'feed' ? (
-             <section className="space-y-12">
-             {loading ? (
-               <div className="flex flex-col items-center justify-center py-24 gap-4">
-                 <div className="w-6 h-6 border-2 border-slate-200 border-t-slate-900 rounded-full animate-spin"></div>
-                 <p className="text-[10px] font-bold text-slate-400 tracking-[0.2em] uppercase">Loading Feed</p>
-               </div>
-             ) : captions.length > 0 ? (
-               (() => {
-                 const item = captions[0];
-                 return (
-                   <div key={item.id} className="bg-white rounded-3xl border border-slate-200 overflow-hidden shadow-sm animate-in fade-in duration-700">
-                     <img src={item.images?.url} className="w-full h-[450px] object-cover border-b border-slate-100" alt="Meme" />
-                     <div className="p-12 text-center space-y-4">
-                       <p className="text-2xl font-bold text-slate-900 leading-snug">"{item.content}"</p>
-                       <p className="text-[10px] text-slate-400 font-bold uppercase tracking-[0.2em]">Curated by {item.profiles?.first_name || 'Anonymous'}</p>
-                     </div>
-                     <div className="flex border-t border-slate-100 divide-x divide-slate-100 h-24">
-                       <button onClick={() => handleVote(item.id, -1)} className="flex-1 h-full text-4xl hover:bg-slate-50 transition-colors opacity-60 hover:opacity-100">👎</button>
-                       <button onClick={() => handleVote(item.id, 1)} className="flex-1 h-full text-4xl hover:bg-slate-50 transition-colors opacity-60 hover:opacity-100">👍</button>
-                     </div>
-                   </div>
-                 );
-               })()
-             ) : (
-               <div className="text-center py-32 border border-slate-200 rounded-[3rem] bg-white/50">
-                 <p className="text-slate-400 font-bold tracking-[0.2em] text-[10px] uppercase">All caught up</p>
-               </div>
-             )}
-           </section>
+            <section className="space-y-12">
+              {loading ? (
+                <div className="flex flex-col items-center justify-center py-24 gap-4">
+                  <div className="w-6 h-6 border-2 border-slate-200 border-t-slate-900 rounded-full animate-spin"></div>
+                  <p className="text-[10px] font-bold text-slate-400 tracking-[0.2em] uppercase">Loading Feed</p>
+                </div>
+              ) : captions.length > 0 ? (
+                (() => {
+                  const item = captions[0];
+                  return (
+                    <div key={item.id} className="bg-white rounded-3xl border border-slate-200 overflow-hidden shadow-sm animate-in fade-in duration-700">
+                      <img src={item.images?.url} className="w-full h-[450px] object-cover border-b border-slate-100" alt="Meme" />
+                      <div className="p-12 text-center space-y-4">
+                        <p className="text-2xl font-bold text-slate-900 leading-snug">"{item.content}"</p>
+                        <p className="text-[10px] text-slate-400 font-bold uppercase tracking-[0.2em]">Curated by {item.profiles?.first_name || 'Anonymous'}</p>
+                      </div>
+                      <div className="flex border-t border-slate-100 divide-x divide-slate-100 h-24">
+                        <button
+                          onClick={() => handleVote(item.id, -1)}
+                          className="flex-1 h-full text-4xl hover:bg-slate-50 transition-colors opacity-60 hover:opacity-100"
+                        >
+                          👎
+                        </button>
+                        <button
+                          onClick={() => handleVote(item.id, 1)}
+                          className="flex-1 h-full text-4xl hover:bg-slate-50 transition-colors opacity-60 hover:opacity-100"
+                        >
+                          👍
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })()
+              ) : (
+                <div className="text-center py-32 border border-slate-200 rounded-[3rem] bg-white/50">
+                  <p className="text-slate-400 font-bold tracking-[0.2em] text-[10px] uppercase">All caught up</p>
+                </div>
+              )}
+            </section>
+          ) : activeTab === 'all' ? (
+            <section className="space-y-10 animate-in fade-in duration-500">
+              <div className="text-center space-y-2">
+                <p className="text-[10px] font-black uppercase tracking-[0.3em] text-slate-400">All Memes</p>
+                <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest italic opacity-70">
+                  Your vote is highlighted; click to change
+                </p>
+              </div>
+
+              {allLoading ? (
+                <div className="flex flex-col items-center justify-center py-24 gap-4">
+                  <div className="w-6 h-6 border-2 border-slate-200 border-t-slate-900 rounded-full animate-spin"></div>
+                  <p className="text-[10px] font-bold text-slate-400 tracking-[0.2em] uppercase">Loading Memes</p>
+                </div>
+              ) : allError ? (
+                <div className="text-center py-24 border border-slate-200 rounded-[3rem] bg-white/50 px-6">
+                  <p className="text-slate-400 font-bold tracking-[0.2em] text-[10px] uppercase">Failed to load</p>
+                  <p className="text-sm text-slate-700 mt-4 break-words">{allError}</p>
+                </div>
+              ) : allCaptions.length > 0 ? (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {allCaptions.map((item) => {
+                    const vote = allVotes[item.id];
+                    const upSelected = vote === 1;
+                    // Some schemas encode "down" as 0 instead of -1.
+                    const downSelected = vote === -1 || vote === 0;
+                    const hasVoted = upSelected || downSelected;
+
+                    return (
+                      <div
+                        key={item.id}
+                        className={`bg-white rounded-3xl border overflow-hidden shadow-sm animate-in fade-in duration-700 ${
+                          upSelected
+                            ? 'border-emerald-200'
+                            : downSelected
+                              ? 'border-rose-200'
+                              : 'border-slate-200'
+                        }`}
+                      >
+                        <img
+                          src={item.images?.url}
+                          className="w-full h-[260px] md:h-[280px] object-cover border-b border-slate-100"
+                          alt="Meme"
+                        />
+                        <div className="p-10 text-center space-y-4">
+                          <p className="text-xl md:text-2xl font-bold text-slate-900 leading-snug">"{item.content}"</p>
+                          <p className="text-[10px] text-slate-400 font-bold uppercase tracking-[0.2em]">
+                            Curated by {item.profiles?.first_name || 'Anonymous'}
+                          </p>
+
+                          {/* Reserve height so voting doesn't cause grid reflow/position shifts */}
+                          <p
+                            className={`text-[10px] font-bold uppercase tracking-[0.2em] ${
+                              hasVoted ? (upSelected ? 'text-emerald-700' : 'text-rose-700') : 'text-slate-400 opacity-0'
+                            }`}
+                          >
+                            {hasVoted ? (upSelected ? 'Upvoted' : 'Downvoted') : 'Upvoted'}
+                          </p>
+                        </div>
+
+                        <div className="flex border-t border-slate-100 divide-x divide-slate-100 h-20">
+                          <button
+                            onClick={() => handleVote(item.id, -1)}
+                            className={`flex-1 h-full text-4xl hover:bg-slate-50 transition-colors ${
+                              downSelected
+                                ? 'opacity-100 bg-rose-50'
+                                : 'opacity-60 hover:opacity-100'
+                            }`}
+                          >
+                            👎
+                          </button>
+                          <button
+                            onClick={() => handleVote(item.id, 1)}
+                            className={`flex-1 h-full text-4xl hover:bg-slate-50 transition-colors ${
+                              upSelected
+                                ? 'opacity-100 bg-emerald-50'
+                                : 'opacity-60 hover:opacity-100'
+                            }`}
+                          >
+                            👍
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="text-center py-24 border border-slate-200 rounded-[3rem] bg-white/50">
+                  <p className="text-slate-400 font-bold tracking-[0.2em] text-[10px] uppercase">No memes yet</p>
+                </div>
+              )}
+            </section>
           ) : (
             <section className="space-y-12 animate-in fade-in duration-500">
               <div className="bg-white p-12 rounded-[2.5rem] border border-slate-200 shadow-sm">
