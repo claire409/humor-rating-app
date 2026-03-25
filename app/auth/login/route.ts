@@ -11,6 +11,11 @@ export async function POST(request: Request) {
     provider: 'google',
     options: {
       redirectTo: `${origin}/auth/callback`,
+      queryParams: {
+        // Force Google to show the account chooser instead of silently reusing
+        // the last signed-in Google session.
+        prompt: 'select_account',
+      },
     },
   });
 
