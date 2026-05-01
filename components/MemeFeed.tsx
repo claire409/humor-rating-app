@@ -23,7 +23,7 @@ export default function MemeFeed({ userEmail, userId }: { userEmail: string; use
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
   ));
 
-  const [activeTab, setActiveTab] = useState<Tab>('vote');
+  const [activeTab, setActiveTab] = useState<Tab>('about');
   const [captions, setCaptions] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [isUploading, setIsUploading] = useState(false);
@@ -582,6 +582,9 @@ export default function MemeFeed({ userEmail, userId }: { userEmail: string; use
                     </div>
                     <p className="text-xs font-semibold text-slate-600 uppercase tracking-widest">
                       Showing from most recent
+                    </p>
+                    <p className="text-xs md:text-sm text-slate-600 leading-relaxed max-w-2xl mx-auto pt-2">
+                      Images may take a moment to appear—especially on slower connections—while each photo loads.
                     </p>
                   </div>
 
