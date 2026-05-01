@@ -54,8 +54,8 @@ export default async function Home() {
             <h1 className="text-7xl font-black mb-4 tracking-tighter uppercase text-slate-900 leading-[0.85]">
               The Humor <br className="md:hidden"/> Project
             </h1>
-            <p className="text-slate-400 mb-12 font-bold text-xs uppercase tracking-[0.4em]">
-              The world's first funny AI
+            <p className="text-slate-600 mb-12 font-bold text-sm uppercase tracking-[0.35em]">
+              The world&apos;s first funny AI
             </p>
 
             <form action="/auth/login" method="POST" className="w-full max-w-sm">
@@ -69,20 +69,20 @@ export default async function Home() {
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 w-full">
             {/* Step 01 */}
             <div className="bg-white p-10 rounded-[3rem] border border-slate-200 shadow-sm animate-in fade-in slide-in-from-bottom-8 delay-200 duration-700">
-              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-4 italic">Step 01</p>
-              <p className="text-md font-bold text-slate-800 leading-tight">Upload any picture.</p>
+              <p className="text-[11px] font-black uppercase tracking-widest text-slate-600 mb-4 italic">Step 01</p>
+              <p className="text-lg font-bold text-slate-900 leading-snug">Upload any picture.</p>
             </div>
 
             {/* Step 02 */}
             <div className="bg-white p-10 rounded-[3rem] border border-slate-200 shadow-sm animate-in fade-in slide-in-from-bottom-8 delay-400 duration-700">
-              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-4 italic">Step 02</p>
-              <p className="text-md font-bold leading-tight">Create your own meme with funny AI-generated captions.</p>
+              <p className="text-[11px] font-black uppercase tracking-widest text-slate-600 mb-4 italic">Step 02</p>
+              <p className="text-lg font-bold text-slate-900 leading-snug">Create your own meme with funny AI-generated captions.</p>
             </div>
 
             {/* Step 03 */}
             <div className="bg-white p-10 rounded-[3rem] border border-slate-200 shadow-sm animate-in fade-in slide-in-from-bottom-8 delay-600 duration-700">
-               <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-4 italic">Step 03</p>
-               <p className="text-md font-bold leading-tight text-slate-800">Explore and vote on the best memes in the feed.</p>
+               <p className="text-[11px] font-black uppercase tracking-widest text-slate-600 mb-4 italic">Step 03</p>
+               <p className="text-lg font-bold leading-snug text-slate-900">Explore and vote on the best memes in the Vote and All tabs.</p>
             </div>
           </div>
 

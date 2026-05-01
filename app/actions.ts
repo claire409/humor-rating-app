@@ -2,13 +2,12 @@
 
 import { createClient } from '@supabase/supabase-js'
 import { revalidatePath } from 'next/cache'
+import { runCaptionPipeline } from '@/lib/captionPipeline'
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 )
-
-const API_BASE = "https://api.almostcrackd.ai/pipeline";
 
 // --- VOTING LOGIC (Assignments 3 & 4) ---
 export async function submitVote(formData: FormData) {
@@ -50,91 +49,54 @@ export async function submitVote(formData: FormData) {
 
 export async function processImageUpload(formData: FormData, token: string, userId: string) {
   const file = formData.get('image') as File;
+  const result = await runCaptionPipeline({ file, token, userId })
+  if (result.success) revalidatePath('/')
+  return result
+}
 
-  try {
-    // Step 1: Presigned URL
-    const s1 = await fetch(`${API_BASE}/generate-presigned-url`, {
-      method: "POST",
-      headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ contentType: file.type })
-    });
-    const { presignedUrl, cdnUrl } = await s1.json();
+export async function deleteUserMeme(formData: FormData) {
+  const imageId = formData.get('imageId') as string;
+  const userId = formData.get('userId') as string;
 
-    // Step 2: S3 Upload
-    const arrayBuffer = await file.arrayBuffer();
-    await fetch(presignedUrl, {
-      method: "PUT",
-      headers: { "Content-Type": file.type },
-      body: Buffer.from(arrayBuffer)
-    });
+  if (!imageId || !userId) throw new Error('Missing imageId or userId');
 
-    // Step 3: Register Image
-    const s3 = await fetch(`${API_BASE}/upload-image-from-url`, {
-      method: "POST",
-      headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ imageUrl: cdnUrl, isCommonUse: false })
-    });
-    const { imageId } = await s3.json();
+  const { data: img, error: imgErr } = await supabaseAdmin
+    .from('images')
+    .select('id, profile_id')
+    .eq('id', imageId)
+    .maybeSingle();
 
-    // Step 4: Generate Captions
-    const s4 = await fetch(`${API_BASE}/generate-captions`, {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${token}`,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({ imageId })
-        });
+  if (imgErr) throw new Error(imgErr.message);
+  if (!img || img.profile_id !== userId) throw new Error('Not allowed');
 
-        const captionsArray = await s4.json(); // Array of 5+ captions
+  const { data: caps, error: capsErr } = await supabaseAdmin
+    .from('captions')
+    .select('id')
+    .eq('image_id', imageId);
 
-        // Persist generated captions so creation history can show them later.
-        // Only insert if this image doesn't already have captions to avoid duplicates.
-        const { data: existingCaps, error: existingError } = await supabaseAdmin
-          .from('captions')
-          .select('id')
-          .eq('image_id', imageId)
-          .limit(1);
+  if (capsErr) throw new Error(capsErr.message);
 
-        if (existingError) throw new Error(existingError.message);
-
-        const alreadyHasCaptions = (existingCaps || []).length > 0;
-        if (!alreadyHasCaptions) {
-          const contents: string[] = Array.isArray(captionsArray)
-            ? captionsArray
-                .map((c: any) => (typeof c === 'string' ? c : c?.content))
-                .filter((c: any) => typeof c === 'string')
-                .map((c: string) => c.trim())
-                .filter((c: string) => c.length > 0)
-            : [];
-
-          if (contents.length > 0) {
-            const nowIso = new Date().toISOString();
-            const rows = contents.map((content) => ({
-              image_id: imageId,
-              content,
-              created_by_user_id: userId,
-              modified_by_user_id: userId,
-              created_datetime_utc: nowIso,
-              modified_datetime_utc: nowIso,
-            }));
-
-            const { error: insertCapsError } = await supabaseAdmin
-              .from('captions')
-              .insert(rows);
-
-            if (insertCapsError) throw new Error(insertCapsError.message);
-          }
-        }
-
-        revalidatePath('/');
-        return {
-          success: true,
-          captions: captionsArray, // Return the whole list
-          imageUrl: cdnUrl
-        };
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Unknown error';
-    return { success: false, error: message };
+  const captionIds = (caps || []).map((c) => c.id);
+  if (captionIds.length > 0) {
+    const { error: votesErr } = await supabaseAdmin
+      .from('caption_votes')
+      .delete()
+      .in('caption_id', captionIds);
+    if (votesErr) throw new Error(votesErr.message);
   }
+
+  const { error: delCapsErr } = await supabaseAdmin
+    .from('captions')
+    .delete()
+    .eq('image_id', imageId);
+  if (delCapsErr) throw new Error(delCapsErr.message);
+
+  const { error: delImgErr } = await supabaseAdmin
+    .from('images')
+    .delete()
+    .eq('id', imageId)
+    .eq('profile_id', userId);
+  if (delImgErr) throw new Error(delImgErr.message);
+
+  revalidatePath('/');
 }

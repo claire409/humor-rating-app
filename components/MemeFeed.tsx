@@ -2,9 +2,20 @@
 
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { createBrowserClient } from '@supabase/ssr';
-import { submitVote, processImageUpload } from '@/app/actions';
+import { submitVote, deleteUserMeme } from '@/app/actions';
+import BlurImage from '@/components/BlurImage';
 
-type Tab = 'vote' | 'all' | 'create';
+type Tab = 'vote' | 'all' | 'create' | 'about';
+
+const NAV_TABS: { key: Tab; label: string }[] = [
+  { key: 'about', label: 'about' },
+  { key: 'vote', label: 'vote' },
+  { key: 'all', label: 'all' },
+  { key: 'create', label: 'create' },
+];
+
+const instrLead = 'text-sm md:text-base font-bold text-slate-900 leading-snug';
+const instrBody = 'text-xs md:text-sm text-slate-700 leading-relaxed max-w-2xl mx-auto';
 
 export default function MemeFeed({ userEmail, userId }: { userEmail: string; userId: string; }) {
   const [supabase] = useState(() => createBrowserClient(
@@ -29,6 +40,35 @@ export default function MemeFeed({ userEmail, userId }: { userEmail: string; use
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [displayName, setDisplayName] = useState<string>("");
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const uploadAbortRef = useRef<AbortController | null>(null);
+
+  const [favoriteCaptionIds, setFavoriteCaptionIds] = useState<Set<string>>(() => new Set());
+
+  useEffect(() => {
+    if (!userId || typeof window === 'undefined') return;
+    try {
+      const raw = localStorage.getItem(`humor_fav_captions_${userId}`);
+      if (raw) setFavoriteCaptionIds(new Set(JSON.parse(raw) as string[]));
+    } catch {
+      /* ignore */
+    }
+  }, [userId]);
+
+  const toggleFavoriteCaption = useCallback((captionId: string) => {
+    setFavoriteCaptionIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(captionId)) next.delete(captionId);
+      else next.add(captionId);
+      if (userId && typeof window !== 'undefined') {
+        try {
+          localStorage.setItem(`humor_fav_captions_${userId}`, JSON.stringify([...next]));
+        } catch {
+          /* ignore */
+        }
+      }
+      return next;
+    });
+  }, [userId]);
 
   // --- FETCH HISTORY: Gets all user images and their captions ---
   const fetchUploadHistory = useCallback(async () => {
@@ -38,18 +78,26 @@ export default function MemeFeed({ userEmail, userId }: { userEmail: string; use
       .eq('profile_id', userId)
       .order('created_datetime_utc', { ascending: false });
 
-    if (images && images.length > 0) {
-      const historyWithCaptions = await Promise.all(
-        images.map(async (img) => {
-          const { data: caps } = await supabase
-            .from('captions')
-            .select('content')
-            .eq('image_id', img.id);
-          return { ...img, captions: caps || [] };
-        })
-      );
-      setHistory(historyWithCaptions);
+    if (!images || images.length === 0) {
+      setHistory([]);
+      return;
     }
+
+    const historyWithCaptions = await Promise.all(
+      images.map(async (img) => {
+        const { data: caps } = await supabase
+          .from('captions')
+          .select('id, content, created_datetime_utc')
+          .eq('image_id', img.id)
+          .order('created_datetime_utc', { ascending: true })
+          .limit(5);
+        const list = (caps || []).filter(
+          (c: { content?: string }) => typeof c?.content === 'string' && c.content.trim().length > 0
+        );
+        return { ...img, captions: list };
+      })
+    );
+    setHistory(historyWithCaptions);
   }, [supabase, userId]);
 
   // --- FETCH FEED: Gets captions for the voting tab ---
@@ -198,27 +246,81 @@ export default function MemeFeed({ userEmail, userId }: { userEmail: string; use
     e.preventDefault();
     if (!selectedFile) return;
 
+    uploadAbortRef.current?.abort();
+    uploadAbortRef.current = new AbortController();
+    const signal = uploadAbortRef.current.signal;
+
     setIsUploading(true);
     try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token) {
+        alert('Please sign in again.');
+        return;
+      }
+
       const formData = new FormData();
       formData.append('image', selectedFile);
-      const { data: { session } } = await supabase.auth.getSession();
-      const result = await processImageUpload(formData, session?.access_token!, userId);
+      formData.append('userId', userId);
 
-      if (result.success) {
-        handleClearImage();
-        setHistory([]); // Force UI reset
-        await fetchUploadHistory();
-        await fetchData();
-      } else {
-        alert("Error: " + result.error);
+      const res = await fetch('/api/caption-pipeline', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
+        signal,
+      });
+
+      let result: { success?: boolean; error?: string; aborted?: boolean } = {};
+      try {
+        result = await res.json();
+      } catch {
+        alert('Unexpected response from server.');
+        return;
       }
+
+      if (res.status === 499 || result.aborted || result.error === 'Cancelled') {
+        return;
+      }
+
+      if (!result.success) {
+        alert('Error: ' + (result.error || 'Unknown'));
+        return;
+      }
+
+      handleClearImage();
+      setHistory([]);
+      await fetchUploadHistory();
+      await fetchData({ showLoading: false });
+      await fetchAllData({ showLoading: false });
     } catch (err) {
-      alert("Failed to upload. The AI might be busy!");
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      alert('Failed to upload. The AI might be busy!');
     } finally {
       setIsUploading(false);
+      uploadAbortRef.current = null;
     }
   };
+
+  const handleStopUpload = () => {
+    uploadAbortRef.current?.abort();
+  };
+
+  const handleDeleteMeme = async (imageId: string) => {
+    if (!confirm('Delete this meme and all captions tied to it? This cannot be undone.')) return;
+    try {
+      const fd = new FormData();
+      fd.append('imageId', imageId);
+      fd.append('userId', userId);
+      await deleteUserMeme(fd);
+      await fetchUploadHistory();
+      await Promise.all([fetchData({ showLoading: false }), fetchAllData({ showLoading: false })]);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Could not delete meme.');
+    }
+  };
+
+  const mainMax =
+    activeTab === 'all' || activeTab === 'create' || activeTab === 'about' ? 'max-w-6xl' : 'max-w-xl';
 
   return (
     <div className="min-h-screen bg-[#FEF9C3] relative">
@@ -233,15 +335,15 @@ export default function MemeFeed({ userEmail, userId }: { userEmail: string; use
 
           <div className="flex items-center gap-10">
             <div className="flex items-center gap-8">
-              {(['vote', 'all', 'create'] as Tab[]).map((tab) => (
+              {NAV_TABS.map(({ key, label }) => (
                 <button
-                  key={tab}
-                  onClick={() => setActiveTab(tab as Tab)}
+                  key={key}
+                  onClick={() => setActiveTab(key)}
                   className={`text-[11px] font-bold tracking-[0.2em] uppercase transition-all ${
-                    activeTab === tab ? 'text-slate-900 border-b-2 border-slate-900 pb-1' : 'text-slate-400 hover:text-slate-600'
+                    activeTab === key ? 'text-slate-900 border-b-2 border-slate-900 pb-1' : 'text-slate-400 hover:text-slate-600'
                   }`}
                 >
-                  {tab}
+                  {label}
                 </button>
               ))}
             </div>
@@ -257,13 +359,19 @@ export default function MemeFeed({ userEmail, userId }: { userEmail: string; use
           </div>
         </nav>
 
-        <main className={`${activeTab === 'all' ? 'max-w-6xl' : 'max-w-xl'} mx-auto py-16 px-4`}>
+        <main className={`${mainMax} mx-auto py-16 px-4`}>
           {activeTab === 'vote' ? (
             <section className="space-y-12">
+              <div className="text-center space-y-2 px-2">
+                <p className={instrLead}>Vote (discovery)</p>
+                <p className={instrBody}>
+                  One meme at a time: swipe-style voting on captions you have not rated yet. After you vote, that meme leaves this queue so you always see something fresh.
+                </p>
+              </div>
               {loading ? (
                 <div className="flex flex-col items-center justify-center py-24 gap-4">
                   <div className="w-6 h-6 border-2 border-slate-200 border-t-slate-900 rounded-full animate-spin"></div>
-                  <p className="text-[10px] font-bold text-slate-400 tracking-[0.2em] uppercase">Loading Feed</p>
+                  <p className="text-xs font-semibold text-slate-600 tracking-[0.15em] uppercase">Loading feed…</p>
                 </div>
               ) : captions.length > 0 ? (
                 (() => {
@@ -300,17 +408,18 @@ export default function MemeFeed({ userEmail, userId }: { userEmail: string; use
             </section>
           ) : activeTab === 'all' ? (
             <section className="space-y-10 animate-in fade-in duration-500">
-              <div className="text-center space-y-2">
-                <p className="text-[10px] font-black uppercase tracking-[0.3em] text-slate-400">All Memes</p>
-                <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest italic opacity-70">
-                  Your vote is highlighted; click to change
+              <div className="text-center space-y-2 px-2">
+                <p className={instrLead}>All (gallery)</p>
+                <p className={instrBody}>
+                  Browse every meme in the collection in a tile grid. Memes you have voted on show your vote (up or down); tap 👍 or 👎 anytime to change your mind.
                 </p>
+                <p className="text-[10px] font-black uppercase tracking-[0.3em] text-slate-500 pt-2">All Memes</p>
               </div>
 
               {allLoading ? (
                 <div className="flex flex-col items-center justify-center py-24 gap-4">
                   <div className="w-6 h-6 border-2 border-slate-200 border-t-slate-900 rounded-full animate-spin"></div>
-                  <p className="text-[10px] font-bold text-slate-400 tracking-[0.2em] uppercase">Loading Memes</p>
+                  <p className="text-xs font-semibold text-slate-600 tracking-[0.15em] uppercase">Loading memes…</p>
                 </div>
               ) : allError ? (
                 <div className="text-center py-24 border border-slate-200 rounded-[3rem] bg-white/50 px-6">
@@ -390,10 +499,16 @@ export default function MemeFeed({ userEmail, userId }: { userEmail: string; use
                 </div>
               )}
             </section>
-          ) : (
+          ) : activeTab === 'create' ? (
             <section className="space-y-12 animate-in fade-in duration-500">
+              <div className="text-center space-y-2 px-2">
+                <p className={instrLead}>Create</p>
+                <p className={instrBody}>
+                  Upload a photo and we&apos;ll generate <strong className="text-slate-900">five</strong> AI captions. Use Stop if you picked the wrong image. Star captions you love; delete a meme from your history when you want it gone.
+                </p>
+              </div>
               <div className="bg-white p-12 rounded-[2.5rem] border border-slate-200 shadow-sm">
-                <h2 className="text-lg font-bold mb-8 text-slate-900 tracking-tight text-center">AI Caption Generator</h2>
+                <h2 className="text-xl font-bold mb-6 text-slate-900 tracking-tight text-center">AI Caption Generator</h2>
                 <form onSubmit={handleUpload} className="space-y-8">
                   <div className="relative border border-slate-100 rounded-3xl p-6 bg-slate-50/50 hover:bg-white hover:border-blue-200 transition-all group overflow-hidden">
                     {!selectedFile ? (
@@ -408,10 +523,10 @@ export default function MemeFeed({ userEmail, userId }: { userEmail: string; use
                           className="block w-full text-xs text-slate-400 file:mr-6 file:py-2 file:px-5 file:rounded-full file:border file:border-slate-200 file:bg-white file:text-slate-900 file:font-bold hover:file:bg-slate-50 transition-all cursor-pointer"
                         />
                         <div className="mt-4 space-y-1">
-                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                          <p className="text-xs font-semibold text-slate-600 uppercase tracking-widest">
                             JPEG, JPG, PNG, WEBP, GIF, HEIC
                           </p>
-                          <p className="text-[9px] text-slate-300 uppercase tracking-[0.2em]">
+                          <p className="text-[11px] text-slate-600 uppercase tracking-[0.15em]">
                             Max file size: 4MB
                           </p>
                         </div>
@@ -427,11 +542,28 @@ export default function MemeFeed({ userEmail, userId }: { userEmail: string; use
                     )}
                   </div>
                   <div className="space-y-3">
-                    <button disabled={isUploading || !selectedFile} className="w-full bg-slate-900 text-white py-4 rounded-full font-bold text-xs uppercase tracking-widest hover:bg-slate-800 disabled:bg-slate-100 disabled:text-slate-300 transition-all">
-                      {isUploading ? "Processing..." : "Generate captions"}
-                    </button>
+                    <div className="flex flex-col sm:flex-row gap-3">
+                      <button
+                        type="submit"
+                        disabled={isUploading || !selectedFile}
+                        className="flex-1 bg-slate-900 text-white py-4 rounded-full font-bold text-xs uppercase tracking-widest hover:bg-slate-800 disabled:bg-slate-100 disabled:text-slate-300 transition-all"
+                      >
+                        {isUploading ? 'Processing...' : 'Generate captions'}
+                      </button>
+                      {isUploading && (
+                        <button
+                          type="button"
+                          onClick={handleStopUpload}
+                          className="sm:w-44 py-4 rounded-full font-bold text-xs uppercase tracking-widest border-2 border-rose-600 text-rose-700 hover:bg-rose-50 transition-all"
+                        >
+                          Stop
+                        </button>
+                      )}
+                    </div>
                     {isUploading && (
-                      <p className="text-center text-[10px] font-medium text-slate-400 animate-pulse uppercase tracking-[0.1em]">This may take a few seconds...</p>
+                      <p className="text-center text-xs font-semibold text-slate-600 animate-pulse uppercase tracking-[0.08em]">
+                        Generating captions… you can Stop if this is the wrong photo.
+                      </p>
                     )}
                   </div>
                 </form>
@@ -440,37 +572,102 @@ export default function MemeFeed({ userEmail, userId }: { userEmail: string; use
               {/* HISTORY SECTION */}
               {history.length > 0 && (
                 <div className="space-y-8">
-                  <div className="text-center space-y-2">
+                  <div className="text-center space-y-2 px-2">
                     <div className="flex items-center gap-4">
                       <div className="h-[1px] flex-1 bg-slate-200"></div>
-                      <p className="text-[10px] font-black uppercase tracking-[0.3em] text-slate-300">Your Creation History</p>
+                      <p className="text-xs md:text-sm font-black uppercase tracking-[0.25em] text-slate-700">
+                        Your Creation History
+                      </p>
                       <div className="h-[1px] flex-1 bg-slate-200"></div>
                     </div>
-                    <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest italic opacity-70">Showing from most recent</p>
+                    <p className="text-xs font-semibold text-slate-600 uppercase tracking-widest">
+                      Showing from most recent
+                    </p>
                   </div>
 
-                  <div className="space-y-12">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                     {history.map((item) => (
-                      <div key={item.id} className="bg-white border border-slate-200 rounded-[2.5rem] p-8 space-y-6 shadow-sm animate-in fade-in duration-500">
-                         <div className="bg-slate-50 rounded-2xl overflow-hidden border border-slate-100">
-                          <img
-                            src={`${item.url}?t=${Date.now()}`}
-                            className="w-full max-h-[400px] object-contain mx-auto"
-                            alt="Uploaded"
+                      <div
+                        key={item.id}
+                        className="bg-white border border-slate-200 rounded-3xl overflow-hidden shadow-sm flex flex-col animate-in fade-in duration-500"
+                      >
+                        <div className="relative h-56 md:h-64 bg-slate-100 border-b border-slate-100">
+                          <BlurImage
+                            src={item.url}
+                            alt="Your upload"
+                            className="h-full w-full"
+                            imgClassName="object-contain bg-slate-50"
                           />
                         </div>
-                        <div className="grid gap-3">
-                          {item.captions.map((cap: any, idx: number) => (
-                            <div key={idx} className="bg-slate-50 p-5 rounded-2xl border border-slate-100">
-                              <p className="text-sm font-medium text-slate-800 italic">"{cap.content}"</p>
-                            </div>
-                          ))}
+                        <div className="p-5 flex flex-col gap-4 flex-1">
+                          <div className="flex justify-end">
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteMeme(item.id)}
+                              className="text-[10px] font-bold uppercase tracking-widest text-rose-700 border border-rose-200 rounded-full px-4 py-2 hover:bg-rose-50 transition-colors"
+                            >
+                              Delete meme
+                            </button>
+                          </div>
+                          <div className="grid gap-2">
+                            {item.captions.map((cap: { id: string; content: string }) => (
+                              <div
+                                key={cap.id}
+                                className="flex gap-2 items-start bg-slate-50 p-4 rounded-2xl border border-slate-100"
+                              >
+                                <button
+                                  type="button"
+                                  onClick={() => toggleFavoriteCaption(cap.id)}
+                                  className={`shrink-0 text-lg leading-none pt-0.5 ${
+                                    favoriteCaptionIds.has(cap.id) ? 'text-amber-500' : 'text-slate-300 hover:text-amber-400'
+                                  }`}
+                                  aria-label={favoriteCaptionIds.has(cap.id) ? 'Remove favorite' : 'Save favorite'}
+                                  title={favoriteCaptionIds.has(cap.id) ? 'Saved favorite' : 'Save favorite'}
+                                >
+                                  {favoriteCaptionIds.has(cap.id) ? '★' : '☆'}
+                                </button>
+                                <p className="text-sm font-medium text-slate-800 italic flex-1 min-w-0">{cap.content}</p>
+                              </div>
+                            ))}
+                          </div>
                         </div>
                       </div>
                     ))}
                   </div>
                 </div>
               )}
+            </section>
+          ) : (
+            <section className="space-y-8 animate-in fade-in duration-500 max-w-3xl mx-auto px-2">
+              <div className="text-center space-y-3">
+                <p className={instrLead}>About The Humor Project</p>
+                <p className={instrBody}>
+                  This app combines AI-generated captions with a community voting loop: upload images, get punchlines, then help surface the funniest pairings.
+                </p>
+              </div>
+              <div className="bg-white rounded-[2rem] border border-slate-200 shadow-sm p-8 md:p-10 space-y-6 text-left">
+                <div>
+                  <h3 className="text-sm font-black uppercase tracking-widest text-slate-900 mb-2">Vote</h3>
+                  <p className="text-sm text-slate-700 leading-relaxed">
+                    Discovery mode: you see one unrated meme at a time. Vote up or down; each vote removes that meme from your personal queue so you always move forward through unseen captions.
+                  </p>
+                </div>
+                <div>
+                  <h3 className="text-sm font-black uppercase tracking-widest text-slate-900 mb-2">All</h3>
+                  <p className="text-sm text-slate-700 leading-relaxed">
+                    Gallery mode: every meme in one tile grid. Already voted memes show how you voted; you can change your vote anytime.
+                  </p>
+                </div>
+                <div>
+                  <h3 className="text-sm font-black uppercase tracking-widest text-slate-900 mb-2">Create</h3>
+                  <p className="text-sm text-slate-700 leading-relaxed">
+                    Upload your own image, generate captions with CrackdAI, star your favorites, and manage your upload history–including deleting memes you no longer want stored.
+                  </p>
+                </div>
+                <p className="text-xs font-semibold text-slate-600 pt-2 border-t border-slate-100">
+                  Ready to try it? Open the Create tab to upload a photo and generate five captions.
+                </p>
+              </div>
             </section>
           )}
         </main>
