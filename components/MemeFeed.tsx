@@ -365,7 +365,7 @@ export default function MemeFeed({ userEmail, userId }: { userEmail: string; use
               <div className="text-center space-y-2 px-2">
                 <p className={instrLead}>Vote (discovery)</p>
                 <p className={instrBody}>
-                  One meme at a time: swipe-style voting on captions you have not rated yet. After you vote, that meme leaves this queue so you always see something fresh.
+                  One meme at a time: vote on captions you have not rated yet. Press 👍 if you like the meme and press 👎 if you dislike it. After you vote, that meme leaves this queue so you always see something fresh.
                 </p>
               </div>
               {loading ? (
